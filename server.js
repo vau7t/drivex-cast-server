@@ -1,7 +1,8 @@
 /**
- * DriveX Cast Server v2.3.0
+ * DriveX Cast Server v2.4.0
  * 
  * WebSocket server for casting files to remote displays
+ * - Video mute/unmute sync command
  * - Sessions deleted immediately when projector disconnects
  * - Orphan sessions cleaned up after 5 seconds
  * - Video play/pause sync commands
@@ -193,6 +194,12 @@ io.on('connection', (socket) => {
   socket.on('video-pause', ({ sessionId }) => {
     console.log(`⏸️ Video pause: ${sessionId}`);
     socket.to(sessionId).emit('video-pause');
+  });
+
+  // Video mute command (from VaultFilePreview to Projector)
+  socket.on('video-mute', ({ sessionId, muted }) => {
+    console.log(`${muted ? '🔇' : '🔊'} Video mute: ${sessionId} -> ${muted}`);
+    socket.to(sessionId).emit('video-mute', { muted });
   });
 
   // Disconnect handling
