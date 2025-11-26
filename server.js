@@ -1,9 +1,11 @@
 /**
- * DriveX Cast Server v2.1.0
+ * DriveX Cast Server v2.3.0
  * 
  * WebSocket server for casting files to remote displays
- * - /sessions endpoint for cross-device auto-discovery
+ * - Sessions deleted immediately when projector disconnects
+ * - Orphan sessions cleaned up after 5 seconds
  * - Video play/pause sync commands
+ * - Auto cast-stop when desktop disconnects
  */
 
 const express = require('express');
@@ -80,6 +82,8 @@ io.on('connection', (socket) => {
       sessions.set(sessionId, { 
         projector: socket.id, 
         controllers: [],
+        main: null,
+        createdAt: Date.now(),
         lastUpdate: Date.now(),
         currentFile: null
       });
@@ -105,6 +109,8 @@ io.on('connection', (socket) => {
       sessions.set(sessionId, { 
         projector: null, 
         controllers: [socket.id],
+        main: null,
+        createdAt: Date.now(),
         lastUpdate: Date.now(),
         currentFile: null
       });
@@ -131,15 +137,15 @@ io.on('connection', (socket) => {
     if (!sessions.has(sessionId)) {
       sessions.set(sessionId, { 
         projector: null, 
-        controllers: [socket.id],
+        controllers: [],
+        main: socket.id,
+        createdAt: Date.now(),
         lastUpdate: Date.now(),
         currentFile: null
       });
     } else {
       const session = sessions.get(sessionId);
-      if (!session.controllers.includes(socket.id)) {
-        session.controllers.push(socket.id);
-      }
+      session.main = socket.id;
       session.lastUpdate = Date.now();
     }
     
@@ -191,31 +197,62 @@ io.on('connection', (socket) => {
 
   // Disconnect handling
   socket.on('disconnect', () => {
-    console.log('Disconnected:', socket.id);
+    console.log('Disconnected:', socket.id, 'role:', socket.role);
     
     if (socket.sessionId) {
       const session = sessions.get(socket.sessionId);
       if (session) {
         if (socket.role === 'projector') {
-          session.projector = null;
-          // Notify controllers projector is gone
+          // Projector disconnected - delete session immediately
+          console.log(`🗑️ Projector disconnected - deleting session: ${socket.sessionId}`);
           socket.to(socket.sessionId).emit('projector-disconnected');
+          sessions.delete(socket.sessionId);
+        } else if (socket.role === 'main') {
+          // Desktop disconnected - notify projector to stop cast
+          console.log('🛑 Main (desktop) disconnected - notifying projector');
+          socket.to(socket.sessionId).emit('cast-stop');
+          session.currentFile = null;
+          session.main = null;
         } else {
           session.controllers = session.controllers.filter(id => id !== socket.id);
         }
         
-        // Clean up empty sessions after delay
-        setTimeout(() => {
-          const s = sessions.get(socket.sessionId);
-          if (s && !s.projector && s.controllers.length === 0) {
-            sessions.delete(socket.sessionId);
-            console.log(`🗑️ Cleaned up session: ${socket.sessionId}`);
-          }
-        }, 30000);
+        // Clean up sessions with no projector after short delay
+        if (socket.role !== 'projector') {
+          setTimeout(() => {
+            const s = sessions.get(socket.sessionId);
+            if (s && !s.projector) {
+              sessions.delete(socket.sessionId);
+              console.log(`🗑️ Cleaned up orphan session: ${socket.sessionId}`);
+            }
+          }, 5000);
+        }
       }
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// PERIODIC CLEANUP
+// ═══════════════════════════════════════════════════════════════
+
+// Clean up stale sessions every 60 seconds
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [sessionId, session] of sessions.entries()) {
+    // Remove sessions older than 10 minutes with no projector
+    if (!session.projector && (now - session.createdAt > 10 * 60 * 1000)) {
+      sessions.delete(sessionId);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`🧹 Periodic cleanup: removed ${cleaned} stale sessions. Active: ${sessions.size}`);
+  }
+}, 60000);
 
 // ═══════════════════════════════════════════════════════════════
 // START SERVER
