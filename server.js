@@ -61,6 +61,7 @@ app.get('/sessions', (req, res) => {
         sessionId,
         hasProjector: !!session.projector,
         hasHost: !!session.host,
+        hasController: (session.controllers?.length || 0) > 0,
         controllerCount: session.controllers?.length || 0,
         viewerCount: session.viewers?.length || 0,
         lastUpdate: session.lastUpdate,
