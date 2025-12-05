@@ -1,7 +1,13 @@
 /**
- * DriveX Cast Server v2.5.0
+ * DriveX Cast Server v2.6.0
  * 
  * WebSocket server for casting files to remote displays
+ * 
+ * CHANGES v2.6.0:
+ * ✅ FIXED: Send projector-ready to controller when joining (was missing!)
+ * ✅ Added join-room handler (generic room join)
+ * ✅ Added ping-projector handler (connection check)
+ * ✅ Better logging for debugging connection issues
  * 
  * CHANGES v2.5.0:
  * ✅ Added viewer-joined handler (viewer → host relay)
@@ -10,13 +16,6 @@
  * ✅ Added register-host handler (for shareable sessions)
  * ✅ Added cast-file-list handler (host → viewer relay)
  * ✅ Added viewer-left handler (viewer → host relay)
- * 
- * Previous features:
- * - Video mute/unmute sync command
- * - Sessions deleted immediately when projector disconnects
- * - Orphan sessions cleaned up after 5 seconds
- * - Video play/pause sync commands
- * - Auto cast-stop when desktop disconnects
  */
 
 const express = require('express');
@@ -44,7 +43,7 @@ const sessions = new Map();
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'online', service: 'DriveX Cast Server', version: '2.5.0' });
+  res.json({ status: 'online', service: 'DriveX Cast Server', version: '2.6.0' });
 });
 
 app.get('/health', (req, res) => {
@@ -117,13 +116,14 @@ io.on('connection', (socket) => {
     
     // Notify controllers that projector is ready
     socket.to(sessionId).emit('projector-ready', { sessionId });
+    console.log(`📤 Sent projector-ready to session ${sessionId}`);
   });
 
   // ═══════════════════════════════════════════════════════════════
   // HOST (VaultFilePreview) HANDLERS
   // ═══════════════════════════════════════════════════════════════
 
-  // ✅ NEW: Host registers a shareable session
+  // Host registers a shareable session
   socket.on('register-host', ({ sessionId }) => {
     console.log(`🎬 Host registered: ${sessionId}`);
     socket.join(sessionId);
@@ -169,18 +169,25 @@ io.on('connection', (socket) => {
         currentFile: null,
         fileList: []
       });
+      console.log(`⏳ Controller waiting for projector`);
     } else {
       const session = sessions.get(sessionId);
       if (!session.controllers.includes(socket.id)) {
         session.controllers.push(socket.id);
       }
       session.lastUpdate = Date.now();
+      
+      // ✅ FIX: If projector already exists, notify THIS controller
+      if (session.projector) {
+        console.log(`📤 Projector exists! Sending projector-ready to controller ${socket.id}`);
+        socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
+      }
     }
     
     socket.sessionId = sessionId;
     socket.role = 'controller';
     
-    // Notify projector
+    // Notify projector that controller joined
     socket.to(sessionId).emit('controller-joined', { socketId: socket.id });
   });
 
@@ -205,6 +212,12 @@ io.on('connection', (socket) => {
       const session = sessions.get(sessionId);
       session.main = socket.id;
       session.lastUpdate = Date.now();
+      
+      // ✅ FIX: If projector already exists, notify THIS main
+      if (session.projector) {
+        console.log(`📤 Projector exists! Sending projector-ready to main ${socket.id}`);
+        socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
+      }
     }
     
     socket.sessionId = sessionId;
@@ -213,11 +226,43 @@ io.on('connection', (socket) => {
     socket.to(sessionId).emit('main-joined', { socketId: socket.id });
   });
 
+  // ✅ NEW: Generic room join
+  socket.on('join-room', ({ room, role }) => {
+    console.log(`🚪 Socket ${socket.id} joining room ${room} as ${role}`);
+    socket.join(room);
+    
+    // If joining as controller, check for projector
+    if ((role === 'controller' || role === 'main') && sessions.has(room)) {
+      const session = sessions.get(room);
+      if (session.projector) {
+        console.log(`📤 Projector exists! Sending projector-ready to ${socket.id}`);
+        socket.emit('projector-ready', { sessionId: room, timestamp: Date.now() });
+      }
+    }
+  });
+
+  // ✅ NEW: Ping projector (connection check)
+  socket.on('ping-projector', ({ sessionId }) => {
+    console.log(`🏓 Ping for session: ${sessionId}`);
+    
+    if (sessions.has(sessionId)) {
+      const session = sessions.get(sessionId);
+      if (session.projector) {
+        console.log(`📤 Projector online! Sending projector-ready to ${socket.id}`);
+        socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
+      } else {
+        console.log(`❌ No projector for session ${sessionId}`);
+      }
+    } else {
+      console.log(`❌ Session not found: ${sessionId}`);
+    }
+  });
+
   // ═══════════════════════════════════════════════════════════════
   // VIEWER HANDLERS (Remote viewers joining via share link)
   // ═══════════════════════════════════════════════════════════════
 
-  // ✅ NEW: Viewer joined via share link
+  // Viewer joined via share link
   socket.on('viewer-joined', (data) => {
     const { sessionId, viewerId, timestamp, userAgent } = data;
     console.log(`👁️ Viewer joined: ${viewerId} for session ${sessionId}`);
@@ -248,7 +293,7 @@ io.on('connection', (socket) => {
     console.log(`📤 Relayed viewer-joined to session ${sessionId}`);
   });
 
-  // ✅ NEW: Viewer has accepted and is ready to receive content
+  // Viewer has accepted and is ready to receive content
   socket.on('viewer-accepted', (data) => {
     const { sessionId, viewerId, timestamp } = data;
     console.log(`✅ Viewer accepted: ${viewerId} for session ${sessionId}`);
@@ -263,7 +308,7 @@ io.on('connection', (socket) => {
     console.log(`📤 Relayed viewer-accepted to session ${sessionId}`);
   });
 
-  // ✅ NEW: Viewer requests navigation
+  // Viewer requests navigation
   socket.on('viewer-navigate', (data) => {
     const { sessionId, viewerId, index, fileName } = data;
     console.log(`🔄 Viewer navigate: ${viewerId} to index ${index} (${fileName})`);
@@ -279,7 +324,7 @@ io.on('connection', (socket) => {
     console.log(`📤 Relayed viewer-navigate to session ${sessionId}`);
   });
 
-  // ✅ NEW: Viewer left
+  // Viewer left
   socket.on('viewer-left', (data) => {
     const { sessionId, viewerId } = data;
     console.log(`👋 Viewer left: ${viewerId} from session ${sessionId}`);
@@ -314,7 +359,7 @@ io.on('connection', (socket) => {
     socket.to(sessionId).emit('cast-update', data);
   });
 
-  // ✅ NEW: Send file list to viewers for navigation
+  // Send file list to viewers for navigation
   socket.on('cast-file-list', (data) => {
     const { sessionId, files } = data;
     console.log(`📋 Cast file list: ${files?.length || 0} files to ${sessionId}`);
@@ -456,5 +501,5 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 DriveX Cast Server v2.5.0 running on port ${PORT}`);
+  console.log(`🚀 DriveX Cast Server v2.6.0 running on port ${PORT}`);
 });
