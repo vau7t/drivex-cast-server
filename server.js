@@ -3,11 +3,6 @@
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
- * 
- * CHANGES v2.7.0:
- * ✅ Added /notifications namespace for share events
- * ✅ Added POST /notify endpoint for backend to trigger notifications
- * ✅ Added JWT verification for notification connections
  */
 
 const express = require('express');
@@ -19,21 +14,17 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const server = http.createServer(app);
 
-// CORS for all origins
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// JWT secret - should match your main backend
 const JWT_SECRET = process.env.JWT_SECRET_KEY || process.env.JWT_SECRET;
+const NOTIFY_SECRET = process.env.NOTIFY_SECRET;
 
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
-// Session storage for cast
 const sessions = new Map();
-
-// Connected notification users: { odId: Set<socketId>, email: Set<socketId> }
 const notificationUsers = {
   byUserId: new Map(),
   byEmail: new Map()
@@ -60,48 +51,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════
-// NOTIFICATION TRIGGER ENDPOINT (called by main backend)
-// ═══════════════════════════════════════════════════════════════
-
-app.post('/notify', (req, res) => {
-  const { secret, event, userId, email, data } = req.body;
-  
-  // Verify secret (simple auth for server-to-server)
-  if (secret !== process.env.NOTIFY_SECRET) {
-    console.log('❌ [Notify] Invalid secret');
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  
-  console.log(`🔔 [Notify] Event: ${event}, userId: ${userId}, email: ${email}`);
-  
-  const notificationsNsp = io.of('/notifications');
-  let delivered = 0;
-  
-  // Emit to user ID room
-  if (userId) {
-    notificationsNsp.to(`user:${userId}`).emit(event, data);
-    const userSockets = notificationUsers.byUserId.get(userId);
-    delivered += userSockets?.size || 0;
-  }
-  
-  // Emit to email room (for guests)
-  if (email) {
-    const normalizedEmail = email.toLowerCase();
-    notificationsNsp.to(`email:${normalizedEmail}`).emit(event, data);
-    const emailSockets = notificationUsers.byEmail.get(normalizedEmail);
-    delivered += emailSockets?.size || 0;
-  }
-  
-  console.log(`📤 [Notify] Delivered to ${delivered} sockets`);
-  
-  res.json({ success: true, delivered });
-});
-
-// Get active sessions (existing endpoint)
 app.get('/sessions', (req, res) => {
   const activeSessions = [];
-  
   sessions.forEach((session, sessionId) => {
     if (session.projector || session.host) {
       activeSessions.push({
@@ -115,8 +66,41 @@ app.get('/sessions', (req, res) => {
       });
     }
   });
-  
   res.json({ success: true, sessions: activeSessions, count: activeSessions.length });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// NOTIFICATION TRIGGER ENDPOINT (called by main backend)
+// ═══════════════════════════════════════════════════════════════
+
+app.post('/notify', (req, res) => {
+  const { secret, event, userId, email, data } = req.body;
+  
+  if (NOTIFY_SECRET && secret !== NOTIFY_SECRET) {
+    console.log('❌ [Notify] Invalid secret');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  console.log(`🔔 [Notify] Event: ${event}, userId: ${userId}, email: ${email}`);
+  
+  const notificationsNsp = io.of('/notifications');
+  let delivered = 0;
+  
+  if (userId) {
+    notificationsNsp.to(`user:${userId}`).emit(event, data);
+    const userSockets = notificationUsers.byUserId.get(userId);
+    delivered += userSockets?.size || 0;
+  }
+  
+  if (email) {
+    const normalizedEmail = email.toLowerCase();
+    notificationsNsp.to(`email:${normalizedEmail}`).emit(event, data);
+    const emailSockets = notificationUsers.byEmail.get(normalizedEmail);
+    delivered += emailSockets?.size || 0;
+  }
+  
+  console.log(`📤 [Notify] Delivered to ${delivered} sockets`);
+  res.json({ success: true, delivered });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -125,7 +109,6 @@ app.get('/sessions', (req, res) => {
 
 const notificationsNsp = io.of('/notifications');
 
-// Auth middleware for notifications
 notificationsNsp.use((socket, next) => {
   const token = socket.handshake.auth.token;
   
@@ -149,7 +132,6 @@ notificationsNsp.use((socket, next) => {
 notificationsNsp.on('connection', (socket) => {
   console.log(`🔔 [Notifications] Connected: ${socket.userId} (${socket.userEmail})`);
   
-  // Track connected users
   if (socket.userId) {
     if (!notificationUsers.byUserId.has(socket.userId)) {
       notificationUsers.byUserId.set(socket.userId, new Set());
@@ -166,7 +148,6 @@ notificationsNsp.on('connection', (socket) => {
     socket.join(`email:${socket.userEmail}`);
   }
   
-  // Manual room join (if needed)
   socket.on('join:user', ({ userId }) => {
     if (userId) {
       socket.join(`user:${userId}`);
@@ -177,14 +158,11 @@ notificationsNsp.on('connection', (socket) => {
   socket.on('disconnect', (reason) => {
     console.log(`🔔 [Notifications] Disconnected: ${socket.userId} - ${reason}`);
     
-    // Clean up tracking
     if (socket.userId) {
       const userSockets = notificationUsers.byUserId.get(socket.userId);
       if (userSockets) {
         userSockets.delete(socket.id);
-        if (userSockets.size === 0) {
-          notificationUsers.byUserId.delete(socket.userId);
-        }
+        if (userSockets.size === 0) notificationUsers.byUserId.delete(socket.userId);
       }
     }
     
@@ -192,9 +170,7 @@ notificationsNsp.on('connection', (socket) => {
       const emailSockets = notificationUsers.byEmail.get(socket.userEmail);
       if (emailSockets) {
         emailSockets.delete(socket.id);
-        if (emailSockets.size === 0) {
-          notificationUsers.byEmail.delete(socket.userEmail);
-        }
+        if (emailSockets.size === 0) notificationUsers.byEmail.delete(socket.userEmail);
       }
     }
   });
@@ -203,16 +179,12 @@ notificationsNsp.on('connection', (socket) => {
 console.log('✅ /notifications namespace initialized');
 
 // ═══════════════════════════════════════════════════════════════
-// CAST SOCKET HANDLERS (existing code - keep all of it)
+// CAST SOCKET HANDLERS
 // ═══════════════════════════════════════════════════════════════
 
 io.on('connection', (socket) => {
   console.log('🔌 Connected:', socket.id);
 
-  // ... ALL YOUR EXISTING CAST HANDLERS ...
-  // (join-projector, join-controller, cast-update, etc.)
-  // Keep everything from your current server
-  
   socket.on('join-projector', ({ sessionId }) => {
     console.log(`📺 Projector joined: ${sessionId}`);
     socket.join(sessionId);
@@ -238,6 +210,34 @@ io.on('connection', (socket) => {
     socket.sessionId = sessionId;
     socket.role = 'projector';
     socket.to(sessionId).emit('projector-ready', { sessionId });
+    console.log(`📤 Sent projector-ready to session ${sessionId}`);
+  });
+
+  socket.on('register-host', ({ sessionId }) => {
+    console.log(`🎬 Host registered: ${sessionId}`);
+    socket.join(sessionId);
+    
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, { 
+        projector: null, 
+        controllers: [],
+        viewers: [],
+        main: null,
+        host: socket.id,
+        createdAt: Date.now(),
+        lastUpdate: Date.now(),
+        currentFile: null,
+        fileList: []
+      });
+    } else {
+      const session = sessions.get(sessionId);
+      session.host = socket.id;
+      session.lastUpdate = Date.now();
+    }
+    
+    socket.sessionId = sessionId;
+    socket.role = 'host';
+    console.log(`✅ Host ${socket.id} registered for session ${sessionId}`);
   });
 
   socket.on('join-controller', ({ sessionId }) => {
@@ -264,6 +264,7 @@ io.on('connection', (socket) => {
       session.lastUpdate = Date.now();
       
       if (session.projector) {
+        console.log(`📤 Projector exists! Sending projector-ready to controller ${socket.id}`);
         socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
       }
     }
@@ -295,6 +296,7 @@ io.on('connection', (socket) => {
       session.lastUpdate = Date.now();
       
       if (session.projector) {
+        console.log(`📤 Projector exists! Sending projector-ready to main ${socket.id}`);
         socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
       }
     }
@@ -304,30 +306,63 @@ io.on('connection', (socket) => {
     socket.to(sessionId).emit('main-joined', { socketId: socket.id });
   });
 
-  socket.on('register-host', ({ sessionId }) => {
-    console.log(`🎬 Host registered: ${sessionId}`);
+  socket.on('join-room', ({ room, role }) => {
+    console.log(`🚪 Socket ${socket.id} joining room ${room} as ${role}`);
+    socket.join(room);
+    
+    if ((role === 'controller' || role === 'main') && sessions.has(room)) {
+      const session = sessions.get(room);
+      if (session.projector) {
+        socket.emit('projector-ready', { sessionId: room, timestamp: Date.now() });
+      }
+    }
+  });
+
+  socket.on('ping-projector', ({ sessionId }) => {
+    console.log(`🏓 Ping for session: ${sessionId}`);
+    if (sessions.has(sessionId) && sessions.get(sessionId).projector) {
+      socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
+    }
+  });
+
+  socket.on('viewer-joined', (data) => {
+    const { sessionId, viewerId, timestamp, userAgent } = data;
+    console.log(`👁️ Viewer joined: ${viewerId} for session ${sessionId}`);
     socket.join(sessionId);
     
-    if (!sessions.has(sessionId)) {
-      sessions.set(sessionId, { 
-        projector: null, 
-        controllers: [],
-        viewers: [],
-        main: null,
-        host: socket.id,
-        createdAt: Date.now(),
-        lastUpdate: Date.now(),
-        currentFile: null,
-        fileList: []
-      });
-    } else {
+    if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
-      session.host = socket.id;
+      if (!session.viewers) session.viewers = [];
+      if (!session.viewers.includes(socket.id)) session.viewers.push(socket.id);
       session.lastUpdate = Date.now();
     }
     
     socket.sessionId = sessionId;
-    socket.role = 'host';
+    socket.role = 'viewer';
+    socket.viewerId = viewerId;
+    socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent });
+  });
+
+  socket.on('viewer-accepted', (data) => {
+    const { sessionId, viewerId, timestamp } = data;
+    console.log(`✅ Viewer accepted: ${viewerId}`);
+    socket.to(sessionId).emit('viewer-accepted', { sessionId, viewerId, timestamp });
+  });
+
+  socket.on('viewer-navigate', (data) => {
+    const { sessionId, viewerId, index, fileName } = data;
+    console.log(`🔄 Viewer navigate: ${viewerId} to index ${index}`);
+    socket.to(sessionId).emit('viewer-navigate', { sessionId, viewerId, index, fileName });
+  });
+
+  socket.on('viewer-left', (data) => {
+    const { sessionId, viewerId } = data;
+    console.log(`👋 Viewer left: ${viewerId}`);
+    if (sessions.has(sessionId)) {
+      const session = sessions.get(sessionId);
+      if (session.viewers) session.viewers = session.viewers.filter(id => id !== socket.id);
+    }
+    socket.to(sessionId).emit('viewer-left', { viewerId });
   });
 
   socket.on('cast-update', (data) => {
@@ -339,44 +374,26 @@ io.on('connection', (socket) => {
       session.currentFile = { url, fileName, index, total };
       session.lastUpdate = Date.now();
     }
-    
     socket.to(sessionId).emit('cast-update', data);
+  });
+
+  socket.on('cast-file-list', (data) => {
+    const { sessionId, files } = data;
+    console.log(`📋 Cast file list: ${files?.length || 0} files`);
+    if (sessions.has(sessionId)) {
+      sessions.get(sessionId).fileList = files;
+    }
+    socket.to(sessionId).emit('cast-file-list', data);
   });
 
   socket.on('cast-stop', ({ sessionId }) => {
     console.log(`⏹️ Cast stopped: ${sessionId}`);
-    
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
       session.currentFile = null;
       session.fileList = [];
-      session.lastUpdate = Date.now();
     }
-    
     socket.to(sessionId).emit('cast-stop');
-  });
-
-  socket.on('viewer-joined', (data) => {
-    const { sessionId, viewerId } = data;
-    console.log(`👁️ Viewer joined: ${viewerId} for session ${sessionId}`);
-    socket.join(sessionId);
-    
-    if (sessions.has(sessionId)) {
-      const session = sessions.get(sessionId);
-      if (!session.viewers) session.viewers = [];
-      if (!session.viewers.includes(socket.id)) {
-        session.viewers.push(socket.id);
-      }
-    }
-    
-    socket.sessionId = sessionId;
-    socket.role = 'viewer';
-    socket.viewerId = viewerId;
-    socket.to(sessionId).emit('viewer-joined', data);
-  });
-
-  socket.on('viewer-navigate', (data) => {
-    socket.to(data.sessionId).emit('viewer-navigate', data);
   });
 
   socket.on('video-play', ({ sessionId }) => {
@@ -400,18 +417,42 @@ io.on('connection', (socket) => {
         if (socket.role === 'projector') {
           socket.to(socket.sessionId).emit('projector-disconnected');
           sessions.delete(socket.sessionId);
-        } else if (socket.role === 'host' || socket.role === 'main') {
+        } else if (socket.role === 'host') {
           socket.to(socket.sessionId).emit('cast-stop');
           session.currentFile = null;
-          session[socket.role] = null;
+          session.fileList = [];
+          session.host = null;
+          setTimeout(() => {
+            const s = sessions.get(socket.sessionId);
+            if (s && !s.projector && !s.host && !s.main) sessions.delete(socket.sessionId);
+          }, 5000);
+        } else if (socket.role === 'main') {
+          socket.to(socket.sessionId).emit('cast-stop');
+          session.currentFile = null;
+          session.main = null;
+        } else if (socket.role === 'viewer') {
+          if (session.viewers) session.viewers = session.viewers.filter(id => id !== socket.id);
+          socket.to(socket.sessionId).emit('viewer-left', { viewerId: socket.viewerId });
         } else {
           session.controllers = session.controllers?.filter(id => id !== socket.id) || [];
-          session.viewers = session.viewers?.filter(id => id !== socket.id) || [];
         }
       }
     }
   });
 });
+
+// Cleanup stale sessions every 60 seconds
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [sessionId, session] of sessions.entries()) {
+    if (!session.projector && !session.host && (now - session.createdAt > 10 * 60 * 1000)) {
+      sessions.delete(sessionId);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) console.log(`🧹 Cleaned ${cleaned} stale sessions`);
+}, 60000);
 
 // ═══════════════════════════════════════════════════════════════
 // START SERVER
