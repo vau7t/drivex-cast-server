@@ -1,8 +1,13 @@
 /**
- * DriveX Cast Server v2.7.0
+ * DriveX Cast Server v2.8.0
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
+ * 
+ * CHANGES v2.8.0:
+ * ✅ Added video-seek relay handler
+ * ✅ Added slideshow-control relay handler
+ * ✅ Added slideshow-interval relay handler
  */
 
 const express = require('express');
@@ -38,8 +43,8 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'online', 
     service: 'DriveX Cast Server', 
-    version: '2.7.0',
-    features: ['cast', 'notifications']
+    version: '2.8.0',
+    features: ['cast', 'notifications', 'video-seek']
   });
 });
 
@@ -396,17 +401,53 @@ io.on('connection', (socket) => {
     socket.to(sessionId).emit('cast-stop');
   });
 
+  // ═══════════════════════════════════════════════════════════════
+  // VIDEO CONTROL RELAY HANDLERS
+  // ═══════════════════════════════════════════════════════════════
+
   socket.on('video-play', ({ sessionId }) => {
+    console.log(`▶️ Video play: ${sessionId}`);
     socket.to(sessionId).emit('video-play');
   });
 
   socket.on('video-pause', ({ sessionId }) => {
+    console.log(`⏸️ Video pause: ${sessionId}`);
     socket.to(sessionId).emit('video-pause');
   });
 
   socket.on('video-mute', ({ sessionId, muted }) => {
+    console.log(`🔇 Video mute: ${muted} for ${sessionId}`);
     socket.to(sessionId).emit('video-mute', { muted });
   });
+
+  // ✅ v2.8.0: Added video-seek relay
+  socket.on('video-seek', ({ sessionId, time }) => {
+    console.log(`⏩ Video seek: ${time}s for ${sessionId}`);
+    socket.to(sessionId).emit('video-seek', { time });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // SLIDESHOW CONTROL RELAY HANDLERS
+  // ═══════════════════════════════════════════════════════════════
+
+  socket.on('slideshow-toggle', ({ sessionId, enabled, interval }) => {
+    console.log(`🎞️ Slideshow toggle: ${enabled} (${interval}s) for ${sessionId}`);
+    socket.to(sessionId).emit('slideshow-control', { enabled, interval });
+  });
+
+  socket.on('slideshow-control', ({ sessionId, enabled, interval }) => {
+    console.log(`🎞️ Slideshow control: ${enabled} (${interval}s) for ${sessionId}`);
+    socket.to(sessionId).emit('slideshow-control', { enabled, interval });
+  });
+
+  socket.on('slideshow-interval', ({ sessionId, interval }) => {
+    console.log(`⏱️ Slideshow interval: ${interval}s for ${sessionId}`);
+    socket.to(sessionId).emit('slideshow-interval', { interval });
+  });
+
+  // ═══════════════════════════════════════════════════════════════
+  // DISCONNECT HANDLER
+  // ═══════════════════════════════════════════════════════════════
 
   socket.on('disconnect', () => {
     console.log('🔌 Disconnected:', socket.id, 'role:', socket.role);
@@ -460,6 +501,6 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 DriveX Cast Server v2.7.0 running on port ${PORT}`);
-  console.log(`   Features: Cast + Notifications`);
+  console.log(`🚀 DriveX Cast Server v2.8.0 running on port ${PORT}`);
+  console.log(`   Features: Cast + Notifications + Video Seek`);
 });
