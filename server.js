@@ -74,7 +74,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'online', 
     service: 'DriveX Cast Server', 
-    version: '2.9.0',
+    version: '2.10.0',
     features: ['cast', 'notifications', 'video-seek', 'viewer-sync']
   });
 });
@@ -395,7 +395,7 @@ io.on('connection', (socket) => {
 
   socket.on('viewer-joined', (data) => {
     const { sessionId, viewerId, timestamp, userAgent, viewerName, location } = data;
-    console.log(`👁️ Viewer joined: ${viewerId} (${viewerName || 'Anonymous'}) for session ${sessionId}`);
+console.log(`👁️ Viewer joined: ${viewerId?.slice(0, 8)}*** for session ${sessionId?.slice(0, 12)}***`);
     socket.join(sessionId);
     
     if (sessions.has(sessionId)) {
@@ -459,19 +459,19 @@ io.on('connection', (socket) => {
     console.log(`👋 Viewer left: ${viewerId}`);
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
-      if (session.viewers) {
-        session.viewers = session.viewers.filter(id => id !== socket.id);
-      }
-      if (session.viewerInfo) {
-        session.viewerInfo = session.viewerInfo.filter(v => v.socketId !== socket.id);
-      }
-      // ✅ v2.10.0: Send updated viewer count with info
-      const viewerCount = session.viewers?.length || 0;
-      io.to(sessionId).emit('viewer-count', { 
-        count: viewerCount, 
-        sessionId,
-        viewers: session.viewerInfo || []
-      });
+if (session.viewers) {
+  session.viewers = session.viewers.filter(id => id !== socket.id);
+}
+if (session.viewerInfo) {
+  session.viewerInfo = session.viewerInfo.filter(v => v.socketId !== socket.id);
+}
+// ✅ v2.10.0: Send updated viewer count with viewer info on disconnect
+const viewerCount = session.viewers?.length || 0;
+io.to(socket.sessionId).emit('viewer-count', { 
+  count: viewerCount, 
+  sessionId: socket.sessionId,
+  viewers: session.viewerInfo || []
+});
     }
     socket.to(sessionId).emit('viewer-left', { viewerId });
   });
@@ -554,7 +554,7 @@ io.on('connection', (socket) => {
   // DISCONNECT HANDLER
   // ═══════════════════════════════════════════════════════════════
 
-  socket.on('disconnect', () => {
+socket.on('disconnect', () => {
     console.log('🔌 Disconnected:', socket.id, 'role:', socket.role);
     
     if (socket.sessionId) {
@@ -579,10 +579,17 @@ io.on('connection', (socket) => {
         } else if (socket.role === 'viewer') {
           if (session.viewers) {
             session.viewers = session.viewers.filter(id => id !== socket.id);
-            // ✅ v2.9.0: Send updated viewer count on disconnect
-            const viewerCount = session.viewers.length;
-            io.to(socket.sessionId).emit('viewer-count', { count: viewerCount, sessionId: socket.sessionId });
           }
+          if (session.viewerInfo) {
+            session.viewerInfo = session.viewerInfo.filter(v => v.socketId !== socket.id);
+          }
+          // ✅ v2.10.0: Send updated viewer count with viewer info on disconnect
+          const viewerCount = session.viewers?.length || 0;
+          io.to(socket.sessionId).emit('viewer-count', { 
+            count: viewerCount, 
+            sessionId: socket.sessionId,
+            viewers: session.viewerInfo || []
+          });
           socket.to(socket.sessionId).emit('viewer-left', { viewerId: socket.viewerId });
         } else {
           session.controllers = session.controllers?.filter(id => id !== socket.id) || [];
@@ -590,7 +597,8 @@ io.on('connection', (socket) => {
       }
     }
   });
-});
+}); // <-- ADD THIS LINE to close io.on('connection')
+
 
 // Cleanup stale sessions every 60 seconds
 setInterval(() => {
@@ -611,6 +619,7 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 DriveX Cast Server v2.9.0 running on port ${PORT}`);
+console.log(`🚀 DriveX Cast Server v2.10.0 running on port ${PORT}`);
   console.log(`   Features: Cast + Notifications + Video Seek + Viewer Sync`);
 });
+
