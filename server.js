@@ -1,8 +1,13 @@
 /**
- * DriveX Cast Server v2.8.0
+ * DriveX Cast Server v2.9.0
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
+ * 
+ * CHANGES v2.9.0:
+ * ✅ FIX: Send viewer count to controller when it joins (sync-viewers event)
+ * ✅ FIX: Controller no longer misses viewer-joined if viewer connected first
+ * ✅ Added viewer-count event for explicit count sync
  * 
  * CHANGES v2.8.0:
  * ✅ Added video-seek relay handler
@@ -43,8 +48,8 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'online', 
     service: 'DriveX Cast Server', 
-    version: '2.8.0',
-    features: ['cast', 'notifications', 'video-seek']
+    version: '2.9.0',
+    features: ['cast', 'notifications', 'video-seek', 'viewer-sync']
   });
 });
 
@@ -184,6 +189,17 @@ notificationsNsp.on('connection', (socket) => {
 console.log('✅ /notifications namespace initialized');
 
 // ═══════════════════════════════════════════════════════════════
+// HELPER: Send viewer count to a socket
+// ═══════════════════════════════════════════════════════════════
+
+const sendViewerCount = (socket, sessionId) => {
+  const session = sessions.get(sessionId);
+  const viewerCount = session?.viewers?.length || 0;
+  console.log(`👁️ [Cast] Sending viewer count to ${socket.id}: ${viewerCount}`);
+  socket.emit('viewer-count', { count: viewerCount, sessionId });
+};
+
+// ═══════════════════════════════════════════════════════════════
 // CAST SOCKET HANDLERS
 // ═══════════════════════════════════════════════════════════════
 
@@ -242,6 +258,10 @@ io.on('connection', (socket) => {
     
     socket.sessionId = sessionId;
     socket.role = 'host';
+    
+    // ✅ v2.9.0: Send current viewer count to new host
+    sendViewerCount(socket, sessionId);
+    
     console.log(`✅ Host ${socket.id} registered for session ${sessionId}`);
   });
 
@@ -276,6 +296,10 @@ io.on('connection', (socket) => {
     
     socket.sessionId = sessionId;
     socket.role = 'controller';
+    
+    // ✅ v2.9.0: Send current viewer count to new controller
+    sendViewerCount(socket, sessionId);
+    
     socket.to(sessionId).emit('controller-joined', { socketId: socket.id });
   });
 
@@ -308,6 +332,10 @@ io.on('connection', (socket) => {
     
     socket.sessionId = sessionId;
     socket.role = 'main';
+    
+    // ✅ v2.9.0: Send current viewer count to new main
+    sendViewerCount(socket, sessionId);
+    
     socket.to(sessionId).emit('main-joined', { socketId: socket.id });
   });
 
@@ -320,6 +348,8 @@ io.on('connection', (socket) => {
       if (session.projector) {
         socket.emit('projector-ready', { sessionId: room, timestamp: Date.now() });
       }
+      // ✅ v2.9.0: Send viewer count when joining room as controller/main
+      sendViewerCount(socket, room);
     }
   });
 
@@ -328,6 +358,12 @@ io.on('connection', (socket) => {
     if (sessions.has(sessionId) && sessions.get(sessionId).projector) {
       socket.emit('projector-ready', { sessionId, timestamp: Date.now() });
     }
+  });
+  
+  // ✅ v2.9.0: Request viewer count explicitly
+  socket.on('get-viewer-count', ({ sessionId }) => {
+    console.log(`👁️ Viewer count requested for: ${sessionId}`);
+    sendViewerCount(socket, sessionId);
   });
 
   socket.on('viewer-joined', (data) => {
@@ -340,11 +376,17 @@ io.on('connection', (socket) => {
       if (!session.viewers) session.viewers = [];
       if (!session.viewers.includes(socket.id)) session.viewers.push(socket.id);
       session.lastUpdate = Date.now();
+      
+      // ✅ v2.9.0: Also send updated viewer count to everyone in the room
+      const viewerCount = session.viewers.length;
+      io.to(sessionId).emit('viewer-count', { count: viewerCount, sessionId });
     }
     
     socket.sessionId = sessionId;
     socket.role = 'viewer';
     socket.viewerId = viewerId;
+    
+    // Relay to others in the room (for UI notification)
     socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent });
   });
 
@@ -365,7 +407,12 @@ io.on('connection', (socket) => {
     console.log(`👋 Viewer left: ${viewerId}`);
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
-      if (session.viewers) session.viewers = session.viewers.filter(id => id !== socket.id);
+      if (session.viewers) {
+        session.viewers = session.viewers.filter(id => id !== socket.id);
+        // ✅ v2.9.0: Send updated viewer count
+        const viewerCount = session.viewers.length;
+        io.to(sessionId).emit('viewer-count', { count: viewerCount, sessionId });
+      }
     }
     socket.to(sessionId).emit('viewer-left', { viewerId });
   });
@@ -420,7 +467,6 @@ io.on('connection', (socket) => {
     socket.to(sessionId).emit('video-mute', { muted });
   });
 
-  // ✅ v2.8.0: Added video-seek relay
   socket.on('video-seek', ({ sessionId, time }) => {
     console.log(`⏩ Video seek: ${time}s for ${sessionId}`);
     socket.to(sessionId).emit('video-seek', { time });
@@ -472,7 +518,12 @@ io.on('connection', (socket) => {
           session.currentFile = null;
           session.main = null;
         } else if (socket.role === 'viewer') {
-          if (session.viewers) session.viewers = session.viewers.filter(id => id !== socket.id);
+          if (session.viewers) {
+            session.viewers = session.viewers.filter(id => id !== socket.id);
+            // ✅ v2.9.0: Send updated viewer count on disconnect
+            const viewerCount = session.viewers.length;
+            io.to(socket.sessionId).emit('viewer-count', { count: viewerCount, sessionId: socket.sessionId });
+          }
           socket.to(socket.sessionId).emit('viewer-left', { viewerId: socket.viewerId });
         } else {
           session.controllers = session.controllers?.filter(id => id !== socket.id) || [];
@@ -501,6 +552,6 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 DriveX Cast Server v2.8.0 running on port ${PORT}`);
-  console.log(`   Features: Cast + Notifications + Video Seek`);
+  console.log(`🚀 DriveX Cast Server v2.9.0 running on port ${PORT}`);
+  console.log(`   Features: Cast + Notifications + Video Seek + Viewer Sync`);
 });
