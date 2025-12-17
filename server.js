@@ -1,8 +1,14 @@
 /**
- * DriveX Cast Server v2.10.0
+ * DriveX Cast Server v2.10.1
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
+ * 
+ * CHANGES v2.10.1:
+ * ✅ Added getViewerDisplayName() - single source of truth for viewer names
+ * ✅ Server generates displayName for all viewers (registered + anonymous)
+ * ✅ Registered users: use provided viewerName
+ * ✅ Anonymous users: generate creative name from location (e.g., "New York Falcon")
  * 
  * CHANGES v2.10.0:
  * ✅ Privacy: Masked emails and user IDs in console logs
@@ -56,6 +62,47 @@ const maskUserId = (userId) => {
   return str.slice(0, 4) + '***' + str.slice(-4);
 };
 
+
+
+// ═══════════════════════════════════════════════════════════════
+// VIEWER NAME GENERATOR - Single source of truth
+// ═══════════════════════════════════════════════════════════════
+
+const CREATIVE_ANIMALS = [
+  'Falcon', 'Tiger', 'Wolf', 'Eagle', 'Panther', 'Phoenix', 'Dragon', 'Hawk',
+  'Lion', 'Leopard', 'Viper', 'Shark', 'Bear', 'Fox', 'Owl', 'Raven'
+];
+
+const generateCreativeName = (location, viewerId) => {
+  const seed = viewerId ? viewerId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) : Date.now();
+  const animal = CREATIVE_ANIMALS[seed % CREATIVE_ANIMALS.length];
+  
+  // Use city if available
+  if (location?.city && location.city !== 'Unknown' && location.city !== 'Localhost') {
+    return `${location.city} ${animal}`;
+  }
+  
+  // Use country if available
+  if (location?.country && location.country !== 'Unknown' && location.country !== 'Local') {
+    return `${location.country} ${animal}`;
+  }
+  
+  // Fallback to region/timezone
+  const region = location?.region || (location?.timezone?.split('/')[0]) || '';
+  if (region && region !== 'Unknown') {
+    return `${region} ${animal}`;
+  }
+  
+  return `Viewer ${animal}`;
+};
+
+const getViewerDisplayName = (viewerName, location, viewerId) => {
+  if (viewerName) return viewerName;
+  return generateCreativeName(location, viewerId);
+};
+
+
+
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
@@ -74,7 +121,7 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'online', 
     service: 'DriveX Cast Server', 
-    version: '2.10.0',
+    version: '2.10.1',
     features: ['cast', 'notifications', 'video-seek', 'viewer-sync']
   });
 });
@@ -393,54 +440,57 @@ io.on('connection', (socket) => {
     sendViewerCount(socket, sessionId);
   });
 
-  socket.on('viewer-joined', (data) => {
-    const { sessionId, viewerId, timestamp, userAgent, viewerName, location } = data;
-console.log(`👁️ Viewer joined: ${viewerId?.slice(0, 8)}*** for session ${sessionId?.slice(0, 12)}***`);
-    socket.join(sessionId);
+socket.on('viewer-joined', (data) => {
+  const { sessionId, viewerId, timestamp, userAgent, viewerName, location } = data;
+  console.log(`👁️ Viewer joined: ${viewerId?.slice(0, 8)}*** for session ${sessionId?.slice(0, 12)}***`);
+  socket.join(sessionId);
+  
+  if (sessions.has(sessionId)) {
+    const session = sessions.get(sessionId);
+    if (!session.viewers) session.viewers = [];
+    if (!session.viewerInfo) session.viewerInfo = [];
     
-    if (sessions.has(sessionId)) {
-      const session = sessions.get(sessionId);
-      if (!session.viewers) session.viewers = [];
-      if (!session.viewerInfo) session.viewerInfo = [];
-      
-      // Store socket.id for counting
-      if (!session.viewers.includes(socket.id)) session.viewers.push(socket.id);
-      
-      // Store viewer info object
-      const existingIndex = session.viewerInfo.findIndex(v => v.socketId === socket.id);
-      const viewerData = {
-        socketId: socket.id,
-        viewerId,
-        name: viewerName || null,
-        location: location || null,
-        joinedAt: timestamp || Date.now()
-      };
-      
-      if (existingIndex === -1) {
-        session.viewerInfo.push(viewerData);
-      } else {
-        session.viewerInfo[existingIndex] = viewerData;
-      }
-      
-      session.lastUpdate = Date.now();
-      
-      // ✅ v2.10.0: Send viewer count AND viewer info to everyone
-      const viewerCount = session.viewers.length;
-      io.to(sessionId).emit('viewer-count', { 
-        count: viewerCount, 
-        sessionId,
-        viewers: session.viewerInfo 
-      });
+    // Store socket.id for counting
+    if (!session.viewers.includes(socket.id)) session.viewers.push(socket.id);
+    
+    // ✅ v2.10.1: Generate displayName on server (single source of truth)
+    const displayName = getViewerDisplayName(viewerName, location, viewerId);
+    
+    // Store viewer info object with pre-computed displayName
+    const existingIndex = session.viewerInfo.findIndex(v => v.socketId === socket.id);
+    const viewerData = {
+      socketId: socket.id,
+      viewerId,
+      displayName,  // ✅ Pre-computed display name
+      location: location || null,
+      joinedAt: timestamp || Date.now()
+    };
+    
+    if (existingIndex === -1) {
+      session.viewerInfo.push(viewerData);
+    } else {
+      session.viewerInfo[existingIndex] = viewerData;
     }
     
-    socket.sessionId = sessionId;
-    socket.role = 'viewer';
-    socket.viewerId = viewerId;
-    socket.viewerName = viewerName;
+    session.lastUpdate = Date.now();
     
-    // Relay to others in the room (for UI notification)
-    socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent, viewerName, location });
-  });
+    // Send viewer count AND viewer info to everyone
+    const viewerCount = session.viewers.length;
+    io.to(sessionId).emit('viewer-count', { 
+      count: viewerCount, 
+      sessionId,
+      viewers: session.viewerInfo 
+    });
+  }
+  
+  socket.sessionId = sessionId;
+  socket.role = 'viewer';
+  socket.viewerId = viewerId;
+  socket.viewerName = viewerName;
+  
+  // Relay to others in the room (for UI notification)
+  socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent, viewerName, location });
+});
 
   socket.on('viewer-accepted', (data) => {
     const { sessionId, viewerId, timestamp } = data;
@@ -619,7 +669,6 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-console.log(`🚀 DriveX Cast Server v2.10.0 running on port ${PORT}`);
+console.log(`🚀 DriveX Cast Server v2.10.1 running on port ${PORT}`);
   console.log(`   Features: Cast + Notifications + Video Seek + Viewer Sync`);
 });
-
