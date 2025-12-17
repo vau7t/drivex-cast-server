@@ -1,8 +1,13 @@
 /**
- * DriveX Cast Server v2.9.0
+ * DriveX Cast Server v2.10.0
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
+ * 
+ * CHANGES v2.10.0:
+ * ✅ Privacy: Masked emails and user IDs in console logs
+ * ✅ Added viewerInfo tracking with names and locations
+ * ✅ viewer-count event now includes viewers array
  * 
  * CHANGES v2.9.0:
  * ✅ FIX: Send viewer count to controller when it joins (sync-viewers event)
@@ -29,6 +34,27 @@ app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET_KEY || process.env.JWT_SECRET;
 const NOTIFY_SECRET = process.env.NOTIFY_SECRET;
+
+// ═══════════════════════════════════════════════════════════════
+// PRIVACY: Mask sensitive data in logs
+// ═══════════════════════════════════════════════════════════════
+
+const maskEmail = (email) => {
+  if (!email) return '[no-email]';
+  const parts = email.split('@');
+  if (parts.length !== 2) return '[invalid]';
+  const name = parts[0];
+  const domain = parts[1];
+  const maskedName = name.length > 2 ? name[0] + '***' + name.slice(-1) : '***';
+  return `${maskedName}@${domain.split('.')[0]}.**`;
+};
+
+const maskUserId = (userId) => {
+  if (!userId) return '[no-id]';
+  const str = String(userId);
+  if (str.length <= 8) return str.slice(0, 2) + '***';
+  return str.slice(0, 4) + '***' + str.slice(-4);
+};
 
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
@@ -91,7 +117,7 @@ app.post('/notify', (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   
-  console.log(`🔔 [Notify] Event: ${event}, userId: ${userId}, email: ${email}`);
+  console.log(`🔔 [Notify] Event: ${event}, userId: ${maskUserId(userId)}, email: ${maskEmail(email)}`);
   
   const notificationsNsp = io.of('/notifications');
   let delivered = 0;
@@ -131,7 +157,7 @@ notificationsNsp.use((socket, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     socket.userId = decoded.id || decoded._id;
     socket.userEmail = decoded.email?.toLowerCase();
-    console.log(`🔔 [Notifications] Auth success: ${socket.userId}`);
+    console.log(`🔔 [Notifications] Auth success: ${maskUserId(socket.userId)}`);
     next();
   } catch (err) {
     console.error('🔔 [Notifications] Auth error:', err.message);
@@ -140,7 +166,7 @@ notificationsNsp.use((socket, next) => {
 });
 
 notificationsNsp.on('connection', (socket) => {
-  console.log(`🔔 [Notifications] Connected: ${socket.userId} (${socket.userEmail})`);
+  console.log(`🔔 [Notifications] Connected: ${maskUserId(socket.userId)}`);
   
   if (socket.userId) {
     if (!notificationUsers.byUserId.has(socket.userId)) {
@@ -161,12 +187,12 @@ notificationsNsp.on('connection', (socket) => {
   socket.on('join:user', ({ userId }) => {
     if (userId) {
       socket.join(`user:${userId}`);
-      console.log(`🔔 [Notifications] Joined room: user:${userId}`);
+      console.log(`🔔 [Notifications] Joined room: user:${maskUserId(userId)}`);
     }
   });
   
   socket.on('disconnect', (reason) => {
-    console.log(`🔔 [Notifications] Disconnected: ${socket.userId} - ${reason}`);
+    console.log(`🔔 [Notifications] Disconnected: ${maskUserId(socket.userId)} - ${reason}`);
     
     if (socket.userId) {
       const userSockets = notificationUsers.byUserId.get(socket.userId);
@@ -195,8 +221,9 @@ console.log('✅ /notifications namespace initialized');
 const sendViewerCount = (socket, sessionId) => {
   const session = sessions.get(sessionId);
   const viewerCount = session?.viewers?.length || 0;
-  console.log(`👁️ [Cast] Sending viewer count to ${socket.id}: ${viewerCount}`);
-  socket.emit('viewer-count', { count: viewerCount, sessionId });
+  const viewers = session?.viewerInfo || [];
+  console.log(`👁️ [Cast] Sending viewer count to ${socket.id}: ${viewerCount} viewers`);
+  socket.emit('viewer-count', { count: viewerCount, sessionId, viewers });
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -367,27 +394,52 @@ io.on('connection', (socket) => {
   });
 
   socket.on('viewer-joined', (data) => {
-    const { sessionId, viewerId, timestamp, userAgent } = data;
-    console.log(`👁️ Viewer joined: ${viewerId} for session ${sessionId}`);
+    const { sessionId, viewerId, timestamp, userAgent, viewerName, location } = data;
+    console.log(`👁️ Viewer joined: ${viewerId} (${viewerName || 'Anonymous'}) for session ${sessionId}`);
     socket.join(sessionId);
     
     if (sessions.has(sessionId)) {
       const session = sessions.get(sessionId);
       if (!session.viewers) session.viewers = [];
+      if (!session.viewerInfo) session.viewerInfo = [];
+      
+      // Store socket.id for counting
       if (!session.viewers.includes(socket.id)) session.viewers.push(socket.id);
+      
+      // Store viewer info object
+      const existingIndex = session.viewerInfo.findIndex(v => v.socketId === socket.id);
+      const viewerData = {
+        socketId: socket.id,
+        viewerId,
+        name: viewerName || null,
+        location: location || null,
+        joinedAt: timestamp || Date.now()
+      };
+      
+      if (existingIndex === -1) {
+        session.viewerInfo.push(viewerData);
+      } else {
+        session.viewerInfo[existingIndex] = viewerData;
+      }
+      
       session.lastUpdate = Date.now();
       
-      // ✅ v2.9.0: Also send updated viewer count to everyone in the room
+      // ✅ v2.10.0: Send viewer count AND viewer info to everyone
       const viewerCount = session.viewers.length;
-      io.to(sessionId).emit('viewer-count', { count: viewerCount, sessionId });
+      io.to(sessionId).emit('viewer-count', { 
+        count: viewerCount, 
+        sessionId,
+        viewers: session.viewerInfo 
+      });
     }
     
     socket.sessionId = sessionId;
     socket.role = 'viewer';
     socket.viewerId = viewerId;
+    socket.viewerName = viewerName;
     
     // Relay to others in the room (for UI notification)
-    socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent });
+    socket.to(sessionId).emit('viewer-joined', { sessionId, viewerId, timestamp, userAgent, viewerName, location });
   });
 
   socket.on('viewer-accepted', (data) => {
@@ -409,10 +461,17 @@ io.on('connection', (socket) => {
       const session = sessions.get(sessionId);
       if (session.viewers) {
         session.viewers = session.viewers.filter(id => id !== socket.id);
-        // ✅ v2.9.0: Send updated viewer count
-        const viewerCount = session.viewers.length;
-        io.to(sessionId).emit('viewer-count', { count: viewerCount, sessionId });
       }
+      if (session.viewerInfo) {
+        session.viewerInfo = session.viewerInfo.filter(v => v.socketId !== socket.id);
+      }
+      // ✅ v2.10.0: Send updated viewer count with info
+      const viewerCount = session.viewers?.length || 0;
+      io.to(sessionId).emit('viewer-count', { 
+        count: viewerCount, 
+        sessionId,
+        viewers: session.viewerInfo || []
+      });
     }
     socket.to(sessionId).emit('viewer-left', { viewerId });
   });
