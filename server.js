@@ -187,6 +187,57 @@ app.post('/notify', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// CHAT MESSAGE BROADCAST ENDPOINT (called by main backend)
+// ═══════════════════════════════════════════════════════════════
+
+app.post('/chat/broadcast', (req, res) => {
+  const { secret, channelPath, channelId, message, recipients } = req.body;
+  
+  if (NOTIFY_SECRET && secret !== NOTIFY_SECRET) {
+    console.log('❌ [Chat] Invalid secret');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  console.log(`💬 [Chat] Broadcasting to ${recipients?.length || 0} recipients`);
+  console.log(`   Channel: ${channelPath}, Message: ${message?.content?.substring(0, 50)}...`);
+  
+  const notificationsNsp = io.of('/notifications');
+  let delivered = 0;
+  
+  // Send to each recipient (by userId and email)
+  if (recipients && Array.isArray(recipients)) {
+    recipients.forEach(recipient => {
+      const { userId, email } = recipient;
+      
+      const eventData = {
+        channelPath,
+        channelId,
+        channelName: channelPath?.replace(/^\//, ''),
+        senderName: message.senderName,
+        senderEmail: message.senderEmail,
+        senderId: message.senderId,
+        messagePreview: message.content,
+        messageId: message._id || message.id,
+        messageType: message.type || 'text'
+      };
+      
+      if (userId) {
+        notificationsNsp.to(`user:${userId}`).emit('chat:message', eventData);
+        delivered++;
+      }
+      
+      if (email) {
+        const normalizedEmail = email.toLowerCase();
+        notificationsNsp.to(`email:${normalizedEmail}`).emit('chat:message', eventData);
+      }
+    });
+  }
+  
+  console.log(`📤 [Chat] Delivered to ${delivered} users`);
+  res.json({ success: true, delivered });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // NOTIFICATIONS NAMESPACE
 // ═══════════════════════════════════════════════════════════════
 
