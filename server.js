@@ -1,8 +1,12 @@
 /**
- * DriveX Cast Server v2.10.1
+ * DriveX Cast Server v2.10.2
  * 
  * WebSocket server for casting files to remote displays
  * + Share notifications
+ * 
+ * CHANGES v2.10.2:
+ * ✅ Fixed cast-stop handler to forward complete data object
+ * ✅ Explicit stop flag now properly transmitted to viewers
  * 
  * CHANGES v2.10.1:
  * ✅ Added getViewerDisplayName() - single source of truth for viewer names
@@ -15,17 +19,13 @@
  * ✅ Added viewerInfo tracking with names and locations
  * ✅ viewer-count event now includes viewers array
  * 
+
+
  * CHANGES v2.9.0:
- * ✅ FIX: Send viewer count to controller when it joins (sync-viewers event)
+ * ✅ FIX: Send viewer count to controller when it joins
  * ✅ FIX: Controller no longer misses viewer-joined if viewer connected first
  * ✅ Added viewer-count event for explicit count sync
- * 
- * CHANGES v2.8.0:
- * ✅ Added video-seek relay handler
- * ✅ Added slideshow-control relay handler
- * ✅ Added slideshow-interval relay handler
- */
-
+ 
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -598,15 +598,19 @@ io.to(socket.sessionId).emit('viewer-count', {
     socket.to(sessionId).emit('cast-file-list', data);
   });
 
-  socket.on('cast-stop', ({ sessionId }) => {
-    console.log(`⏹️ Cast stopped: ${sessionId}`);
-    if (sessions.has(sessionId)) {
-      const session = sessions.get(sessionId);
-      session.currentFile = null;
-      session.fileList = [];
-    }
-    socket.to(sessionId).emit('cast-stop');
-  });
+socket.on('cast-stop', (data) => {  // ✅ Accept full data object
+  const { sessionId, timestamp, explicit } = data;
+  console.log(`⏹️ Cast stopped: ${sessionId}, explicit: ${explicit}`);
+  
+  if (sessions.has(sessionId)) {
+    const session = sessions.get(sessionId);
+    session.currentFile = null;
+    session.fileList = [];
+  }
+  
+  // ✅ FORWARD THE COMPLETE DATA OBJECT!
+  socket.to(sessionId).emit('cast-stop', data);
+});
 
   // ═══════════════════════════════════════════════════════════════
   // VIDEO CONTROL RELAY HANDLERS
