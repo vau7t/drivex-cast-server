@@ -19,13 +19,9 @@
  * ✅ Added viewerInfo tracking with names and locations
  * ✅ viewer-count event now includes viewers array
  * 
+ * ... rest of comments
+ */
 
-
- * CHANGES v2.9.0:
- * ✅ FIX: Send viewer count to controller when it joins
- * ✅ FIX: Controller no longer misses viewer-joined if viewer connected first
- * ✅ Added viewer-count event for explicit count sync
- 
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
